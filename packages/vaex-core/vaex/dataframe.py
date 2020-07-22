@@ -1255,7 +1255,7 @@ class DataFrame(object):
         dtypes = [self.data_type(expr) for expr in expressions]
         dtype0 = dtypes[0]
         if not all([k.kind == dtype0.kind for k in dtypes]):
-            raise ValueError("cannot mix datetime and non-datetime expressions")
+            raise TypeError("cannot mix different dtypes in 1 minmax call")
         progressbar = vaex.utils.progressbars(progress, name="minmaxes")
         limits = self.limits(binby, limits, selection=selection, delay=True)
         all_tasks = [calculate(expression, limits) for expression in expressions]
@@ -1414,10 +1414,10 @@ class DataFrame(object):
                 percentiles = []
                 for p in percentages:
                     if p == 0:
-                        percentiles.append(percentile_limits[0])
+                        percentiles.append(percentile_limits[i][0])
                         continue
                     if p == 100:
-                        percentiles.append(percentile_limits[1])
+                        percentiles.append(percentile_limits[i][1])
                         continue
                     values = np.array((totalcounts + 1) * p / 100.)  # make sure it's an ndarray
                     values[empty] = 0
@@ -2010,17 +2010,18 @@ class DataFrame(object):
 
     def data_type(self, expression, array_type=None, internal=False, check_alias=True):
         """Return the datatype for the given expression, if not a column, the first row will be evaluated to get the data type.
-        
+
         Example:
-        
+
         >>> df = vaex.from_scalars(x=1, s='Hi')
-        
+
         :param str array_type: 'numpy', 'arrow' or None, to indicate if the data type should be converted
         """
         expression = _ensure_string_from_expression(expression)
         if check_alias:
             if expression in self._column_aliases:
                 expression = self._column_aliases[expression]  # translate the alias name into the real name
+        data_type = None
         if expression in self._dtypes_override:
             data_type = self._dtypes_override[expression]
         elif expression in self.variables:
@@ -2028,15 +2029,18 @@ class DataFrame(object):
         elif self.is_local() and expression in self.columns.keys():
             column = self.columns[expression]
             if hasattr(column, 'dtype'):
+                # TODO: this probably would use data_type
+                # to support Columns that wrap arrow arrays
                 data_type = column.dtype
             else:
                 data = column[0:1]
-                data_type = array_types.numpy_dtype(data)
         else:
             try:
                 data = self.evaluate(expression, 0, 1, filtered=False, array_type=array_type, parallel=False)
             except:
                 data = self.evaluate(expression, 0, 1, filtered=True, array_type=array_type, parallel=False)
+        if data_type is None:
+            # means we have to determine it from the data
             if isinstance(data, np.ndarray):
                 data_type = data.dtype
             elif isinstance(data, Column):
@@ -4378,13 +4382,11 @@ class DataFrame(object):
         return self._filter_all(self.func.isinf, column_names)
 
     def _filter_all(self, f, column_names=None):
-        copy = self.copy()
         column_names = column_names or self.get_column_names(virtual=False)
         expression = f(self[column_names[0]])
         for column in column_names[1:]:
             expression = expression | f(self[column])
-        copy.select(~expression, name=FILTER_SELECTION_NAME, mode='and')
-        return copy
+        return self.filter(~expression, mode='and')
 
     def select_nothing(self, name="default"):
         """Select nothing."""
@@ -5454,10 +5456,10 @@ class DataFrameLocal(DataFrame):
                     chunks_map[expression] = {}
                 else:
                     # we know exactly where to place the chunks, so we pre allocate the arrays
-                    shape = (length, ) + df._shape_of(expression, filtered=False)[1:]
-                    shapes[expression] = shape
                     if expression in virtual:
                         if isinstance(dtype, np.dtype):
+                            shape = (length, ) + df._shape_of(expression, filtered=False)[1:]
+                            shapes[expression] = shape
                             # numpy arrays are fixed length, so we can pre allocate them
                             if df.is_masked(expression):
                                 arrays[expression] = np.ma.empty(shapes.get(expression, length), dtype=dtypes[expression])
